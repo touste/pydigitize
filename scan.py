@@ -22,7 +22,7 @@ Options:
     -r RESOLUTION  Set the resolution [default: 300].
     -c PAGES       Page count to scan [default: all pages from ADF]
     
-    --no-shring    Do not shrink resulting pdf.
+    --no-shrink    Do not shrink resulting pdf.
     --nowait       When scanning multiple pages (with the -c parameter), don't
                    wait for manual confirmation but scan as fast as the scanner
                    can process the pages.
@@ -261,7 +261,6 @@ if __name__ == '__main__':
     # Default args
     kwargs = {
         'output': default_output,
-        'keywords': {'pydigitize'},
     }
     no_shrink = False
     
