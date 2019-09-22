@@ -7,7 +7,7 @@ Usage:
 Examples:
     scan.py out/
     scan.py out/document.pdf
-    scan.py out/ -n document -k foo,bar
+    scan.py out/ -n document
 
 Args:
     OUTPUT         This can either be a filename or a directory name.
@@ -16,17 +16,13 @@ Options:
     -h --help      Show this help.
     --version      Show version.
 
-    -p PROFILE     The profile to use.
-
     -n NAME        Text that will be incorporated into the filename.
-    -t DATE        Use the specified date string (format: YYYYMMDD)
-    -k KEYWORDS    Comma separated keywords that will be added to the PDF metadata.
 
     -d DEVICE      Set the device.
     -r RESOLUTION  Set the resolution [default: 300].
     -c PAGES       Page count to scan [default: all pages from ADF]
-
-    --skip-ocr     Don't run OCR / straightening / cleanup step.
+    
+    --no-shring    Do not shrink resulting pdf.
     --nowait       When scanning multiple pages (with the -c parameter), don't
                    wait for manual confirmation but scan as fast as the scanner
                    can process the pages.
@@ -45,8 +41,6 @@ import tempfile
 
 import docopt
 from sh import cd, mv
-from slugify import slugify
-import toml
 
 try:
     from sh import scanimage
@@ -61,21 +55,9 @@ except ImportError:
     sys.exit(1)
 
 try:
-    from sh import ocrmypdf
+    from sh import gs
 except ImportError:
-    print('Error: ocrmypdf command not found. Please install ocrmypdf.')
-    sys.exit(1)
-
-try:
-    from sh import tesseract  # noqa
-except ImportError:
-    print('Error: tesseract command not found. Please install tesseract.')
-    sys.exit(1)
-
-try:
-    from sh import unpaper  # noqa
-except ImportError:
-    print('Error: unpaper command not found. Please install unpaper.')
+    print('Error: gs commands not found. Please install ghostscript.')
     sys.exit(1)
 
 
@@ -83,7 +65,6 @@ logger = logging.getLogger('pydigitize')
 
 
 VALID_RESOLUTIONS = (100, 200, 300, 400, 600)
-START_TIME = datetime.datetime.now()
 
 
 def prefix():
@@ -99,7 +80,6 @@ class Scan:
         output,
         name: str = None,
         datestring: str = None,
-        keywords: str = None,
         count: int = None,
         nowait: bool = False
     ):
@@ -111,7 +91,6 @@ class Scan:
         - resolution
         - device
         - output_path
-        - keywords
         - count
 
         """
@@ -130,22 +109,15 @@ class Scan:
         # Store device
         self.device = device
 
-        # Store keywords
-        self.keywords = set() if keywords is None else set(keywords)
-
-        # Validate and set timestamp
-        if datestring is None:
-            timestamp = START_TIME.strftime('%Y%m%d-%H%M%S')
-        else:
-            datestring = re.sub(r'[^0-9]', '', datestring)
-            timestamp = datestring or START_TIME.strftime('%Y%m%d-%H%M%S')
-
+        # set timestamp
+        Timestamp = START_TIME.strftime('%Y%m%d') + 'Z'
+        
         # Validate and store output path
         if os.path.isdir(output):
             if name is None:
                 filename = '{}.pdf'.format(timestamp)
             else:
-                filename = '{}-{}.pdf'.format(timestamp, slugify(name, to_lower=True))
+                filename = name
             output_path = os.path.join(output, filename)
         elif os.path.dirname(output) == '' or os.path.isdir(os.path.dirname(output)):
             output_path = output
@@ -229,19 +201,22 @@ class Scan:
         """
         print(prefix() + 'Converting to PDF...')
         tiff2pdf('output.tif', p='A4', o='output.pdf')
-
-    def do_ocr(self):
+        
+    def shrink_pdf(self):
         """
-        Do character recognition (OCR) with ``ocrmypdf``.
+        Shrink pdf.
         """
-        print(prefix() + 'Running OCR...')
-        args = ['-l', 'deu', '-d', '-c']
-        if self.keywords:
-            args.extend(['--keywords', ','.join(self.keywords)])
-        args.extend(['output.pdf', 'clean.pdf'])
-        ocrmypdf(*args)
-
-    def process(self, *, skip_ocr=False):
+        print(prefix() + 'Shrinking PDF...')
+        gs_args = ['q', 'dNOPAUSE', 'dBATCH', 'dSAFER', 'sDEVICE=pdfwrite', 
+                   'dCompatibilityLevel=1.3', 'dPDFSETTINGS=/screen', 
+                   'dEmbedAllFonts=true', 'dSubsetFonts=true', 
+                   'dColorImageDownsampleType=/Bicubic', 'dColorImageResolution=185',
+                   'dGrayImageDownsampleType=/Bicubic', 'dGrayImageResolution=185',
+                   'dMonoImageDownsampleType=/Bicubic', 'dMonoImageResolution=185']
+        gs_args.extend(['sOutputFile=output.pdf', 'clean.pdf'])
+        gs(*args)
+        
+    def process(self, *, no_shrink=False):
         # Prepare directories
         self.prepare_directories()
         cd(self.workdir)
@@ -255,9 +230,9 @@ class Scan:
         # Convert tiff to pdf
         self.convert_tiff_to_pdf()
 
-        # Do OCR
-        if skip_ocr is False:
-            self.do_ocr()
+        # Shrink
+        if no_shrink is False:
+            self.shrink_pdf()
             filename = 'clean.pdf'
         else:
             filename = 'output.pdf'
@@ -288,68 +263,17 @@ if __name__ == '__main__':
         'output': default_output,
         'keywords': {'pydigitize'},
     }
-    skip_ocr = False
-
-    # Process profile
-    if args['-p'] is not None:
-        # Load profiles
-        with open('profiles.toml', 'r') as conffile:
-            profiles = toml.loads(conffile.read())
-
-        # Create list of all profiles
-        all_profiles = []
-
-        def _parse_profile(k, v, prefix=None):
-            if isinstance(v, dict):
-                if prefix is None:
-                    new_prefix = k
-                else:
-                    new_prefix = '%s.%s' % (prefix, k)
-                all_profiles.append(new_prefix)
-                for kk, vv in v.items():
-                    _parse_profile(kk, vv, new_prefix)
-
-        for k, v in profiles.items():
-            _parse_profile(k, v)
-
-        # Find profile
-        profile = profiles
-        profile_name = args['-p']
-        profile_parts = profile_name.split('.')
-        for part in profile_parts:
-            found = profile.get(part)
-            if found is None:
-                print('Profile not found: {}'.format(profile_name))
-                print('\nAvailable profiles:')
-                for name in sorted(all_profiles):
-                    print(' - %s' % name)
-                sys.exit(1)
-            profile = found
-
-        # Update args
-        if 'path' in profile:
-            kwargs['output'] = profile['path']
-        if 'name' in profile:
-            kwargs['name'] = profile['name']
-        if 'ocr' in profile:
-            skip_ocr = not bool(profile['ocr'])
-        if 'keywords' in profile:
-            kwargs['keywords'].update(profile['keywords'])
-
-    # Argument overrides
+    no_shrink = False
+    
+    # Arguments
     kwargs['resolution'] = args['-r']
     kwargs['device'] = args['-d']
     if args['OUTPUT']:
         kwargs['output'] = args['OUTPUT']
-    if args['--skip-ocr'] is True:
-        skip_ocr = True
+    if args['--no-shrink'] is True:
+        no_shrink = True
     if args['-n']:
         kwargs['name'] = args['-n']
-    if args['-t']:
-        kwargs['datestring'] = args['-t']
-    if args['-k']:
-        keywords = [k.strip() for k in args.get('-k', '').split(',')]
-        kwargs['keywords'].update(keywords)
     if args['-c']:
         if args['-c'] == 'all pages from ADF':
             kwargs['count'] = None
@@ -366,4 +290,4 @@ if __name__ == '__main__':
     print(' <_/_\_/_\_/_\_/_\_/_\_/_______/   \\\n')
 
     scan = Scan(**kwargs)
-    scan.process(skip_ocr=skip_ocr)
+    scan.process(no_shrink=no_shrink)
